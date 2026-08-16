@@ -10,13 +10,8 @@ If there are no meaningful style issues, respond with exactly: "No style issues 
 Do not comment on functionality, security, or logic — style only."""
 
 
-def style_agent_node(state: AgentState) -> AgentState:
+def style_agent_node(state: AgentState) -> dict:
     llm = get_llm_provider()
-
     prompt = f"Review this diff for style issues:\n\n{state['diff_summary']}"
     result = llm.generate(prompt, system_prompt=STYLE_SYSTEM_PROMPT)
-
-    state["style_findings"] = [result]
-    state["final_review"] = result  # today: style output IS the final review
-
-    return state
+    return {"style_findings": [result]}
