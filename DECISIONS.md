@@ -71,6 +71,43 @@ missing trailing newline) — all with accurate line numbers, in a single LLM ca
 
 ---
 
+## Day 3 — Parallel Multi-Agent Architecture & Synthesis
+
+**Decision: Expanded from single-agent to 3 parallel specialist agents + synthesis**
+- Added security_agent (SQLi, command injection, insecure deserialization, weak crypto,
+  hardcoded secrets) and test_coverage_agent (flags new logic with no corresponding
+  test changes in the diff).
+- Added synthesis_agent to merge all three specialists' findings into one categorized,
+  deduplicated review — grouped by section (🔒 Security, 🧪 Tests, 🎨 Style), ordered
+  by severity, with empty sections omitted rather than padded.
+
+**Bug hit and fixed: `InvalidUpdateError` on concurrent state writes**
+- Running 3 agents in parallel (fan-out from START) caused a LangGraph error:
+  multiple nodes writing the full state dict back caused concurrent writes to
+  unrelated keys (e.g. `repo_full_name`) that LangGraph couldn't merge.
+- Fix: each node now returns a partial state update (only the keys it actually
+  changed) instead of the full state object — the correct LangGraph pattern for
+  parallel branches. Also improves auditability of what each node's side effects are.
+
+**Decision: Used START-based fan-out instead of set_entry_point() for parallel branches**
+- `set_entry_point()` only supports a single entry node; calling it multiple times
+  silently overwrites rather than creating multiple parallel branches.
+- Correct pattern: `graph.add_edge(START, node)` for each parallel branch, with all
+  branches converging on a shared downstream node (synthesis_agent) — LangGraph
+  automatically waits for all incoming edges before running the fan-in node.
+
+**Result:** Tested against a diff with 7 real security vulnerabilities (SQLi, 2x
+command injection, insecure deserialization, weak hashing, 2x hardcoded secrets),
+9 functions with zero test coverage, and 15+ style issues — all three agents ran
+in parallel, synthesis correctly merged and prioritized all findings with no
+duplicates or hallucinations, posted as a single autonomous PR comment.
+
+**Result (negative test):** Re-ran on a trivial README-only diff — security and
+test-coverage agents correctly returned no findings, and synthesis correctly
+omitted those sections entirely rather than padding the review with empty results.
+
+---
+
 ## Open items / things to revisit
 - Webhook processing is synchronous — move to async Redis job queue (planned Day 4).
 - LangGraph pipeline is single-node — expand to parallel security/test-coverage agents + synthesis node (planned Day 3).
