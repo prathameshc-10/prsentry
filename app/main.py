@@ -1,8 +1,8 @@
-from fastapi import FastAPI
 from dotenv import load_dotenv
-from app.api.webhooks import router as webhook_router
-
 load_dotenv()
+
+from fastapi import FastAPI
+from app.api.webhooks import router as webhook_router
 
 app = FastAPI(title="PRSentry")
 app.include_router(webhook_router)

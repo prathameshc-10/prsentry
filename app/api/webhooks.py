@@ -1,8 +1,9 @@
 from fastapi import APIRouter, Request, HTTPException
 from app.core.security import verify_signature
-from app.github.auth import get_installation_token
-from app.github.client import get_pr_files, get_diff_summary
-from app.agents.graph import build_graph
+from app.jobs.queue import review_queue
+from app.jobs.tasks import process_pr_review
+from app.db.session import SessionLocal
+from app.db.models import PullRequest, ReviewRun
 import json
 
 router = APIRouter()
@@ -24,22 +25,27 @@ async def github_webhook(request: Request):
         repo_full_name = payload["repository"]["full_name"]
         print(f"[PR EVENT] {repo_full_name} #{pr_number} — action: {action}")
 
-        # Trigger the review pipeline
-        token = get_installation_token()
-        files = get_pr_files(repo_full_name, pr_number, token)
-        diff = get_diff_summary(files)
+        # Create a pending review_run row immediately, before the job even runs
+        db = SessionLocal()
+        pr_row = db.query(PullRequest).filter_by(
+            repo_name=repo_full_name, pr_number=pr_number
+        ).first()
+        if not pr_row:
+            pr_row = PullRequest(repo_name=repo_full_name, pr_number=pr_number)
+            db.add(pr_row)
+            db.commit()
+            db.refresh(pr_row)
 
-        graph = build_graph()
-        graph.invoke({
-            "repo_full_name": repo_full_name,
-            "pr_number": pr_number,
-            "installation_token": token,
-            "files_changed": files,
-            "diff_summary": diff,
-            "style_findings": [],
-            "final_review": "",
-        })
+        pending_run = ReviewRun(pr_id=pr_row.id, status="pending")
+        db.add(pending_run)
+        db.commit()
+        db.refresh(pending_run)
+        run_id = pending_run.id
+        db.close()
 
-        print(f"[REVIEW POSTED] {repo_full_name} #{pr_number}")
+        # Enqueue the actual work, passing the run_id so the worker updates this exact row
+        review_queue.enqueue(process_pr_review, repo_full_name, pr_number, run_id)
+
+        print(f"[JOB ENQUEUED] {repo_full_name} #{pr_number} — run_id={run_id}")
 
     return {"status": "received"}

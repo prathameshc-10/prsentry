@@ -108,6 +108,42 @@ omitted those sections entirely rather than padding the review with empty result
 
 ---
 
-## Open items / things to revisit
-- Webhook processing is synchronous — move to async Redis job queue (planned Day 4).
-- LangGraph pipeline is single-node — expand to parallel security/test-coverage agents + synthesis node (planned Day 3).
+## Day 4 — Async Processing (Redis Queue) & Job Lifecycle Tracking
+
+**Decision: Postgres + Redis via Docker Compose, moved off default port 5432**
+- Local pgAdmin-bundled Postgres was already bound to host port 5432, causing
+  password auth failures against the Docker container (different Postgres
+  instance entirely, same port). Remapped Docker Postgres to host port 5433
+  rather than fighting the local service — avoids future conflicts on other
+  machines/projects with a pre-existing local Postgres install.
+
+**Decision: Webhook handler now enqueues a job instead of running the pipeline inline**
+- Previously (Day 2-3), the webhook blocked on 4 sequential/parallel LLM calls
+  before returning — risky given GitHub's ~10s webhook timeout, and would not
+  scale to concurrent PRs.
+- Webhook now: verifies signature → creates a `pending` ReviewRun row → enqueues
+  the job via RQ → returns 200 OK immediately (confirmed in milliseconds).
+  Actual LangGraph pipeline execution moved to a separate worker process.
+
+**Bug hit and fixed: RQ's default `Worker` uses `os.fork()`, unavailable on Windows**
+- `fork()` is Unix/Linux-only; RQ's standard worker crashed immediately on job
+  pickup with `AttributeError: module 'os' has no attribute 'fork'`.
+- Fixed by switching to `rq.SimpleWorker`, which runs jobs in-process rather than
+  forking a child process per job — correct for Windows local dev. Production
+  deployment (Linux container) would use the standard `Worker` for proper
+  per-job process isolation.
+
+**Bug hit and fixed: duplicate ReviewRun rows from split creation logic**
+- Webhook handler created a `pending` ReviewRun row, but the worker's job function
+  independently created a *second*, separate row instead of updating the first —
+  caught by querying Postgres directly rather than trusting terminal logs, which
+  looked correct despite the underlying data being wrong.
+- Fixed by passing the `run_id` through the enqueued job payload, so the worker
+  updates the exact same row the webhook created, giving one clean row per
+  trigger with a correct pending → running → completed/failed lifecycle.
+
+**Verified end-to-end today:**
+Push → webhook returns 200 OK in milliseconds (no LLM blocking) → separate worker
+process picks up the job from Redis → runs the full 4-agent LangGraph pipeline
+(~15.5s) → posts the review → Postgres shows a single ReviewRun row transitioning
+correctly through pending → running → completed, confirmed via direct SQL query.
